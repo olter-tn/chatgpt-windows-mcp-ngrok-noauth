@@ -14,6 +14,23 @@ If there is no tunnel, start again:
 .\scripts\start-demo.ps1 -WindowsMcpPath ..\Windows-MCP
 ```
 
+## `Client must accept text/event-stream`
+
+If ChatGPT or another MCP client shows:
+
+```json
+{"code":-32600,"message":"Not Acceptable: Client must accept both application/json and text/event-stream"}
+```
+
+restart with the default launcher:
+
+```powershell
+.\scripts\stop-demo.ps1
+.\scripts\start-demo.ps1 -WindowsMcpPath ..\Windows-MCP
+```
+
+The default launcher exposes a local compatibility proxy through ngrok. The proxy forwards to Windows-MCP and adds the required Streamable HTTP `Accept` media types when a client drops them.
+
 ## Use `/mcp`, not `/mcp/`
 
 Use:
@@ -54,7 +71,7 @@ Configure your token:
 ngrok config add-authtoken YOUR_NGROK_TOKEN
 ```
 
-## Port 8001 is already in use
+## Port 8002 is already in use
 
 Stop the demo:
 

@@ -17,7 +17,8 @@ The demo starts a local Windows-MCP server on your machine, exposes it through a
 ```text
 ChatGPT
   -> ngrok HTTPS URL
-  -> http://127.0.0.1:8001/mcp
+  -> local compatibility proxy
+  -> http://127.0.0.1:8002/mcp
   -> Windows-MCP
   -> your Windows desktop
 ```
@@ -73,6 +74,18 @@ https://example.ngrok-free.dev/mcp
 
 Use that exact `/mcp` URL in ChatGPT. Do not add a trailing slash.
 
+By default, the script puts a tiny local compatibility proxy between ngrok and Windows-MCP. The proxy adds the required Streamable HTTP `Accept: application/json, text/event-stream` media types if a client drops them, which avoids this common error:
+
+```text
+Not Acceptable: Client must accept both application/json and text/event-stream
+```
+
+To expose Windows-MCP directly, run:
+
+```powershell
+.\scripts\start-demo.ps1 -WindowsMcpPath ..\Windows-MCP -NoAcceptProxy
+```
+
 ## ChatGPT setup
 
 In ChatGPT Developer Mode, create a custom app:
@@ -121,6 +134,7 @@ docs/
   troubleshooting.md    Common failures and fixes
 scripts/
   preflight.ps1         Checks tools and scans tracked files for accidental secrets
+  mcp_accept_proxy.py   Normalizes missing Streamable HTTP Accept headers
   start-demo.ps1        Starts Windows-MCP and ngrok
   stop-demo.ps1         Stops the demo processes
   verify_mcp.py         Lists tools and calls Snapshot through MCP

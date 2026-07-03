@@ -1,5 +1,5 @@
 param(
-    [int]$Port = 8001
+    [int]$Port = 8002
 )
 
 Set-StrictMode -Version Latest
@@ -10,10 +10,21 @@ Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force
 $matches = Get-CimInstance Win32_Process |
     Where-Object {
         $_.CommandLine -and
-        ($_.CommandLine -like "*windows_mcp*" -or $_.CommandLine -like "*windows-mcp*") -and
-        $_.CommandLine -like "*serve*" -and
-        $_.CommandLine -like "*--port*" -and
-        $_.CommandLine -like "*$Port*"
+        (
+            (
+                ($_.CommandLine -like "*windows_mcp*" -or $_.CommandLine -like "*windows-mcp*") -and
+                $_.CommandLine -like "*serve*" -and
+                $_.CommandLine -like "*--port*" -and
+                $_.CommandLine -like "*$Port*"
+            ) -or
+            (
+                $_.CommandLine -like "*mcp_accept_proxy.py*" -and
+                (
+                    $_.CommandLine -like "*--target-port $Port*" -or
+                    $_.CommandLine -like "*--target-port*$Port*"
+                )
+            )
+        )
     }
 
 foreach ($process in $matches) {

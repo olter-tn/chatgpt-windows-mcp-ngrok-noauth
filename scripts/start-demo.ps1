@@ -1,9 +1,11 @@
 param(
-    [int]$Port = 8001,
+    [int]$Port = 8002,
     [string]$HostName = "127.0.0.1",
     [string]$WindowsMcpPath = "",
     [string]$NgrokPath = "",
+    [int]$ProxyPort = 0,
     [double]$ScreenshotScale = 0.5,
+    [switch]$NoAcceptProxy,
     [switch]$SkipVerify
 )
 
@@ -92,11 +94,24 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $runDir = Join-Path $repoRoot ".run"
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 
+if ($ProxyPort -eq 0) {
+    $ProxyPort = $Port + 1
+}
+
 $existing = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue |
     Where-Object { $_.State -eq "Listen" } |
     Select-Object -First 1
 if ($existing) {
     throw "Port $Port is already in use by process $($existing.OwningProcess). Run .\scripts\stop-demo.ps1 or choose another port."
+}
+
+if (-not $NoAcceptProxy) {
+    $existingProxy = Get-NetTCPConnection -LocalPort $ProxyPort -ErrorAction SilentlyContinue |
+        Where-Object { $_.State -eq "Listen" } |
+        Select-Object -First 1
+    if ($existingProxy) {
+        throw "Proxy port $ProxyPort is already in use by process $($existingProxy.OwningProcess). Run .\scripts\stop-demo.ps1 or choose another proxy port."
+    }
 }
 
 $noAuthConfig = Join-Path $runDir "windows-mcp-no-auth.toml"
@@ -152,6 +167,33 @@ if (-not (Wait-For-Port -WaitPort $Port -TimeoutSeconds 45)) {
     throw "Windows-MCP did not start on port $Port. Check $serverErr"
 }
 
+$proxyProcess = $null
+if (-not $NoAcceptProxy) {
+    $uvForProxy = Resolve-Executable -Name "uv" -ExplicitPath ""
+    if (-not $uvForProxy) {
+        throw "uv was not found on PATH."
+    }
+
+    $proxyScript = Join-Path $PSScriptRoot "mcp_accept_proxy.py"
+    $proxyOut = Join-Path $runDir "mcp-accept-proxy.log"
+    $proxyErr = Join-Path $runDir "mcp-accept-proxy.error.log"
+    $proxyArgs = @(
+        "run", "--python", "3.13",
+        "python", $proxyScript,
+        "--listen-host", $HostName,
+        "--listen-port", [string]$ProxyPort,
+        "--target-host", $HostName,
+        "--target-port", [string]$Port
+    )
+    $proxyProcess = Start-Process -FilePath $uvForProxy -ArgumentList $proxyArgs `
+        -RedirectStandardOutput $proxyOut -RedirectStandardError $proxyErr `
+        -WindowStyle Hidden -PassThru
+
+    if (-not (Wait-For-Port -WaitPort $ProxyPort -TimeoutSeconds 30)) {
+        throw "MCP accept proxy did not start on port $ProxyPort. Check $proxyErr"
+    }
+}
+
 $ngrokExe = Resolve-Ngrok
 $ngrokOut = Join-Path $runDir "ngrok.log"
 $ngrokErr = Join-Path $runDir "ngrok.error.log"
@@ -159,10 +201,11 @@ $ngrokErr = Join-Path $runDir "ngrok.error.log"
 Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
 
-$upstream = "http://$HostName`:$Port"
+$ngrokPort = if ($NoAcceptProxy) { $Port } else { $ProxyPort }
+$upstream = "http://$HostName`:$ngrokPort"
 $ngrokArgs = @(
     "http", $upstream,
-    "--host-header=$HostName`:$Port",
+    "--host-header=$HostName`:$ngrokPort",
     "--log=stdout"
 )
 $ngrokProcess = Start-Process -FilePath $ngrokExe -ArgumentList $ngrokArgs `
@@ -174,6 +217,9 @@ $mcpUrl = "$publicUrl/mcp"
 
 Write-Host ""
 Write-Host "Windows-MCP process: $($serverProcess.Id)"
+if ($proxyProcess) {
+    Write-Host "Accept proxy process: $($proxyProcess.Id)"
+}
 Write-Host "ngrok process:       $($ngrokProcess.Id)"
 Write-Host ""
 Write-Host "ChatGPT MCP URL:"
@@ -182,6 +228,9 @@ Write-Host ""
 Write-Host "ChatGPT settings:"
 Write-Host "Protocol: Streamable HTTP"
 Write-Host "Authentication: No Authentication"
+if ($proxyProcess) {
+    Write-Host "Compatibility: Missing Accept headers are normalized before Windows-MCP"
+}
 Write-Host ""
 Write-Host "Stop with:"
 Write-Host ".\scripts\stop-demo.ps1 -Port $Port"
