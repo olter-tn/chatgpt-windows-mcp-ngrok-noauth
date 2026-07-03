@@ -1,0 +1,8 @@
+.run/
+__pycache__/
+*.pyc
+.venv/
+*.log
+*.error.log
+.DS_Store
+Thumbs.db
