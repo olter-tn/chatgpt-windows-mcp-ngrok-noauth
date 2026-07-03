@@ -10,7 +10,7 @@ Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force
 $matches = Get-CimInstance Win32_Process |
     Where-Object {
         $_.CommandLine -and
-        $_.CommandLine -like "*windows_mcp*" -and
+        ($_.CommandLine -like "*windows_mcp*" -or $_.CommandLine -like "*windows-mcp*") -and
         $_.CommandLine -like "*serve*" -and
         $_.CommandLine -like "*--port*" -and
         $_.CommandLine -like "*$Port*"

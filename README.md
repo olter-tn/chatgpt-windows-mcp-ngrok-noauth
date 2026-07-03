@@ -50,6 +50,12 @@ ngrok config add-authtoken YOUR_NGROK_TOKEN
 From this repo:
 
 ```powershell
+.\scripts\preflight.ps1
+```
+
+Then start the demo with a local Windows-MCP checkout:
+
+```powershell
 .\scripts\start-demo.ps1 -WindowsMcpPath ..\Windows-MCP
 ```
 
@@ -114,6 +120,7 @@ docs/
   security.md           What no-auth means and how to reduce risk
   troubleshooting.md    Common failures and fixes
 scripts/
+  preflight.ps1         Checks tools and scans tracked files for accidental secrets
   start-demo.ps1        Starts Windows-MCP and ngrok
   stop-demo.ps1         Stops the demo processes
   verify_mcp.py         Lists tools and calls Snapshot through MCP
@@ -122,6 +129,8 @@ scripts/
 ## Notes
 
 - This repo does not vendor Windows-MCP.
+- Runtime files are written under `.run/`, which is ignored by Git.
+- The docs use fake placeholder domains and tokens only. Run `.\scripts\preflight.ps1` before publishing changes.
 - The recommended production shape is OAuth or a proper secure tunnel. This repo is intentionally about the no-auth ngrok path for demos.
 - If `Snapshot` does not return an image, use a Windows-MCP build where `Snapshot` defaults to screenshot-first behavior, or call it with `use_vision=true`.
 
