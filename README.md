@@ -1,18 +1,11 @@
-# ChatGPT Windows MCP via ngrok, no auth
+# ChatGPT Windows MCP via ngrok (No Auth)
 
-This repo is a practical demo for connecting ChatGPT to a Windows desktop through MCP using:
+A practical demo for connecting ChatGPT to a Windows desktop through MCP using [CursorTouch/Windows-MCP](https://github.com/CursorTouch/Windows-MCP), ngrok, Streamable HTTP, and a ChatGPT custom MCP app.
 
-- [CursorTouch/Windows-MCP](https://github.com/CursorTouch/Windows-MCP)
-- ngrok
-- ChatGPT Developer Mode custom MCP apps
-- Streamable HTTP
-- No Authentication
+> [!WARNING]
+> This setup intentionally uses **no authentication** for quick demos. Anyone who gets the public ngrok URL may be able to invoke exposed Windows-MCP tools. Use it only on a machine you control, keep the tunnel short-lived, and stop ngrok when finished.
 
-Huge shout-out to **CursorTouch/Windows-MCP**. That project does the real Windows automation work. This repo is a small field guide and launcher around it, focused on the exact "make ChatGPT use my Windows computer" path.
-
-## What this does
-
-The demo starts a local Windows-MCP server on your machine, exposes it through an ngrok HTTPS URL, and gives you the URL to paste into ChatGPT as a custom MCP app.
+## How it works
 
 ```text
 ChatGPT
@@ -20,27 +13,21 @@ ChatGPT
   -> local compatibility proxy
   -> http://127.0.0.1:8002/mcp
   -> Windows-MCP
-  -> your Windows desktop
+  -> Windows desktop
 ```
 
-## Security warning
-
-This demo intentionally uses **No Authentication** because that is the simplest way to test a custom MCP app in ChatGPT.
-
-While ngrok is running, anyone who obtains the public URL may be able to use the exposed MCP tools. Windows-MCP can control apps, type, click, take screenshots, access files, run PowerShell, inspect processes, and read or write parts of the registry.
-
-Use this only for short-lived demos on a machine you control. Stop ngrok as soon as you finish.
+The compatibility proxy normalizes Streamable HTTP `Accept` headers so clients can communicate reliably with Windows-MCP.
 
 ## Prerequisites
 
 - Windows 10 or Windows 11
 - Python 3.13 available through `uv`
-- `uv` installed
-- ngrok installed and authenticated
+- `uv`
+- ngrok, installed and authenticated
 - ChatGPT Developer Mode access
-- A local clone of CursorTouch/Windows-MCP, or permission to run it from PyPI with `uvx`
+- Optional: a local checkout of `CursorTouch/Windows-MCP`
 
-If ngrok is installed but not authenticated:
+Authenticate ngrok if needed:
 
 ```powershell
 ngrok config add-authtoken YOUR_NGROK_TOKEN
@@ -48,47 +35,35 @@ ngrok config add-authtoken YOUR_NGROK_TOKEN
 
 ## Quick start
 
-From this repo:
+Run the preflight checks:
 
 ```powershell
 .\scripts\preflight.ps1
 ```
 
-Then start the demo with a local Windows-MCP checkout:
+Start with a local Windows-MCP checkout:
 
 ```powershell
 .\scripts\start-demo.ps1 -WindowsMcpPath ..\Windows-MCP
 ```
 
-If you do not have a local Windows-MCP checkout, the script can run the PyPI package through `uvx`:
+Or let the script run the package through `uvx`:
 
 ```powershell
 .\scripts\start-demo.ps1
 ```
 
-The script prints a ChatGPT MCP URL like:
+The launcher prints an MCP endpoint similar to:
 
 ```text
 https://example.ngrok-free.dev/mcp
 ```
 
-Use that exact `/mcp` URL in ChatGPT. Do not add a trailing slash.
+Use that exact `/mcp` endpoint in ChatGPT without adding a trailing slash.
 
-By default, the script puts a tiny local compatibility proxy between ngrok and Windows-MCP. The proxy adds the required Streamable HTTP `Accept: application/json, text/event-stream` media types if a client drops them, which avoids this common error:
+## Configure ChatGPT
 
-```text
-Not Acceptable: Client must accept both application/json and text/event-stream
-```
-
-To expose Windows-MCP directly, run:
-
-```powershell
-.\scripts\start-demo.ps1 -WindowsMcpPath ..\Windows-MCP -NoAcceptProxy
-```
-
-## ChatGPT setup
-
-In ChatGPT Developer Mode, create a custom app:
+Create a custom MCP app in ChatGPT Developer Mode with:
 
 ```text
 MCP server URL: https://YOUR-NGROK-DOMAIN.ngrok-free.dev/mcp
@@ -96,26 +71,33 @@ Protocol: Streamable HTTP
 Authentication: No Authentication
 ```
 
-Then ask ChatGPT to call `Snapshot`. A working setup should return a desktop screenshot and a structured result with `ok: true`.
+Then call the `Snapshot` tool. A successful connection should return a desktop screenshot and a structured result with `ok: true`.
 
-See [docs/chatgpt-setup.md](docs/chatgpt-setup.md) for the full walkthrough.
+For the full walkthrough, see [`docs/chatgpt-setup.md`](docs/chatgpt-setup.md).
 
-## Verify manually
-
-After starting the tunnel:
+## Verify the connection
 
 ```powershell
 uv run --with fastmcp python .\scripts\verify_mcp.py https://YOUR-NGROK-DOMAIN.ngrok-free.dev/mcp
 ```
 
-Expected output includes:
+A healthy run should report that `Snapshot` completed successfully and returned the expected content.
+
+## Direct mode
+
+By default, the demo uses a small local proxy to ensure the required Streamable HTTP media types are present. To expose Windows-MCP directly instead:
+
+```powershell
+.\scripts\start-demo.ps1 -WindowsMcpPath ..\Windows-MCP -NoAcceptProxy
+```
+
+If you encounter:
 
 ```text
-Snapshot output schema: true
-Snapshot is_error: false
-Snapshot content types: text,image
-Snapshot structured ok: true
+Not Acceptable: Client must accept both application/json and text/event-stream
 ```
+
+restart without `-NoAcceptProxy` so the compatibility proxy is enabled.
 
 ## Stop the demo
 
@@ -123,30 +105,33 @@ Snapshot structured ok: true
 .\scripts\stop-demo.ps1
 ```
 
-This stops ngrok and the Windows-MCP process started on the demo port.
+This stops ngrok and the Windows-MCP process started for the demo.
 
-## Repo layout
+## Repository structure
 
 ```text
 docs/
-  chatgpt-setup.md      Full ChatGPT custom MCP app setup
-  security.md           What no-auth means and how to reduce risk
+  chatgpt-setup.md      ChatGPT custom MCP app walkthrough
+  security.md           No-auth risks and mitigations
   troubleshooting.md    Common failures and fixes
+
 scripts/
-  preflight.ps1         Checks tools and scans tracked files for accidental secrets
-  mcp_accept_proxy.py   Normalizes missing Streamable HTTP Accept headers
+  preflight.ps1         Checks dependencies and scans tracked files for secrets
+  mcp_accept_proxy.py   Normalizes Streamable HTTP Accept headers
   start-demo.ps1        Starts Windows-MCP and ngrok
-  stop-demo.ps1         Stops the demo processes
-  verify_mcp.py         Lists tools and calls Snapshot through MCP
+  stop-demo.ps1         Stops demo processes
+  verify_mcp.py         Lists tools and verifies Snapshot through MCP
 ```
 
-## Notes
+## Security notes
 
-- This repo does not vendor Windows-MCP.
-- Runtime files are written under `.run/`, which is ignored by Git.
-- The docs use fake placeholder domains and tokens only. Run `.\scripts\preflight.ps1` before publishing changes.
-- The recommended production shape is OAuth or a proper secure tunnel. This repo is intentionally about the no-auth ngrok path for demos.
-- If `Snapshot` does not return an image, use a Windows-MCP build where `Snapshot` defaults to screenshot-first behavior, or call it with `use_vision=true`.
+Windows-MCP can expose powerful desktop capabilities such as clicking, typing, screenshots, file access, PowerShell execution, process inspection, and registry access. A public no-auth tunnel should therefore be treated as temporary and sensitive.
+
+For anything beyond a controlled demo, use authentication or a properly secured tunnel. See [`docs/security.md`](docs/security.md).
+
+## Credits
+
+The Windows automation layer comes from [CursorTouch/Windows-MCP](https://github.com/CursorTouch/Windows-MCP). This repository focuses on the ChatGPT + ngrok integration path around it.
 
 ## License
 
