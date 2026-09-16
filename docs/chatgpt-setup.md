@@ -1,83 +1,60 @@
-# ChatGPT setup
+# Connect ChatGPT to the laptop MCP
 
-This guide assumes the demo has already started and printed a public ngrok URL.
+## Start and verify the endpoint
 
-## 1. Start the local MCP server and ngrok
+The easiest path is to extract the GitHub ZIP and double-click **Open MCP Manager.cmd**. Complete **Setup & settings**, select remote access, install missing software and save your ngrok authtoken. Click **Start MCP**, approve Windows elevation if requested, and wait for **Running**. **Connect an AI app** provides the remaining instructions. No Python or ngrok installation is required beforehand. See the [first-run guide](launcher.md).
+
+Alternatively, from PowerShell in this repository:
 
 ```powershell
-.\scripts\start-demo.ps1 -WindowsMcpPath ..\Windows-MCP
+.\scripts\setup.ps1
+.\scripts\preflight.ps1
+.\scripts\start-demo.ps1
 ```
 
-The script prints something like:
+ngrok must already have its account token configured. The launcher prints `MCP URL:` followed by the public HTTPS address ending in `/mcp`. It verifies local and public endpoints before reporting success. Omit `-WindowsMcpPath` to use the locked, tested package.
+
+For administrative Windows operations, start from PowerShell opened with **Run as administrator** and add `-RequireAdministrator`. Stop an existing instance first with `stop-demo.ps1` from an appropriately elevated shell.
+
+## Add the connection
+
+The official setup flow, checked on 2026-09-15, is: enable Developer mode under **Settings → Security and login**, open **ChatGPT Plugins**, use the plus button, and create a connection using the public MCP URL. Availability depends on account and workspace policy. See [OpenAI's connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt).
+
+For this repository select **Streamable HTTP** and **No Authentication**. Developer mode supports read and write tools, subject to ChatGPT's confirmation settings. See [OpenAI's Developer mode documentation](https://developers.openai.com/api/docs/guides/developer-mode).
+
+Review the discovered tools: there should be **24**, including `Command`, `FileTransfer`, `UploadFile`, and `ComputerCapabilities`. After updating an existing server, refresh the connection's metadata and start a new conversation with it enabled. The MCP cannot enable tools that the client or workspace has disabled.
+
+## Confirm access and vision
+
+Ask the agent:
 
 ```text
-ChatGPT MCP URL:
-https://example.ngrok-free.dev/mcp
+Use this Windows MCP connection. First call ComputerCapabilities and report
+the elevated and interactive_desktop_available values. Then call Screenshot.
 ```
 
-Use the exact URL. The path should be `/mcp`, without a trailing slash.
+`Screenshot` returns an image. `Snapshot` extracts UI information by default; to request an image with it, use:
 
-## 2. Create the ChatGPT custom MCP app
-
-In ChatGPT Developer Mode:
-
-1. Open the custom app or connector creation flow.
-2. Choose MCP.
-3. Enter the public ngrok URL:
-
-```text
-https://example.ngrok-free.dev/mcp
+```json
+{"use_vision": true, "use_ui_tree": false}
 ```
 
-4. Select:
+Set `use_ui_tree=true` when you also need UI elements. Do not assume every upstream tool returns the same structured `ok` field; check MCP errors and each tool's documented result.
 
-```text
-Protocol: Streamable HTTP
-Authentication: No Authentication
+For long commands or complete stdout/stderr, use `Command` and poll the returned job ID. Use `UploadFile(path)` to get a real download link for a laptop file, and `FileTransfer` for binary chunks. [File sharing](file-sharing.md) explains how agents can return the exported file in a conversation. The [README](../README.md) covers the remaining tools.
+
+## Verify independently of ChatGPT
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\verify_mcp.py https://YOUR-DOMAIN.ngrok-free.dev/mcp --exercise --desktop --report .run\verification-public.json
 ```
 
-5. Save or connect the app.
+`--desktop` briefly opens and operates a disposable test window. This verifies the MCP endpoint directly; it does not prove that a particular model will select the right tool for every task.
 
-## 3. Test with Snapshot
-
-Ask ChatGPT:
-
-```text
-Use the Windows MCP Snapshot tool and tell me what is on my screen.
-```
-
-Expected behavior:
-
-- ChatGPT discovers the Windows-MCP tools.
-- `Snapshot` is visible.
-- `Snapshot` returns text plus an image.
-- The structured result includes `ok: true`.
-
-## 4. Use the computer
-
-Once Snapshot works, ChatGPT can use tools like:
-
-- `Screenshot`
-- `Snapshot`
-- `Click`
-- `Type`
-- `Shortcut`
-- `App`
-- `PowerShell`
-- `FileSystem`
-- `Clipboard`
-- `Process`
-
-Give specific, reversible tasks first. For example:
-
-```text
-Take a snapshot, then open Notepad and type "hello from ChatGPT". Do not save any file.
-```
-
-## 5. Stop when done
+Stop this instance with:
 
 ```powershell
 .\scripts\stop-demo.ps1
 ```
 
-Leaving a no-auth tunnel open is the main risk in this setup.
+Anyone who can reach the public endpoint can invoke its tools with the server's Windows privileges. See [access and exposure](security.md).

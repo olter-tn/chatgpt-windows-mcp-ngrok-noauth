@@ -1,46 +1,31 @@
-# Security notes
+# Access and exposure
 
-This repo demonstrates a no-auth MCP tunnel because it is the easiest way to connect a custom MCP app in ChatGPT.
+This repository intentionally offers the full tool set without MCP authentication. There is no command allowlist or filesystem sandbox. An agent can execute programs, read or modify accessible files and registry keys, operate the desktop, and use installed software and network APIs with the server's Windows access token.
 
-No auth also means no access control at the MCP layer.
+The public ngrok URL is an access route to the laptop. Anyone who can reach it can invoke those capabilities; there is no per-agent identity or authorization layer. Running the server as Administrator extends that same access to administrative operations. TLS protects transport to ngrok but does not authenticate the caller to this MCP.
 
-## What is exposed
+## What the implementation checks
 
-Windows-MCP can expose tools that interact with your Windows machine, including:
+HTTP components bind to loopback. Remote access passes through the explicitly started ngrok tunnel. Incoming browser Origin headers are validated; untrusted origins receive 403. A non-browser caller can omit that header, so Origin checks do not replace authentication. The [MCP transport specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) describes these transport requirements and recommends authentication.
 
-- screen capture
-- mouse and keyboard control
-- app launching and switching
-- filesystem access
-- PowerShell execution
-- clipboard access
-- process listing and termination
-- registry access
+Startup verifies the local endpoint before publishing and the public endpoint before reporting success. The launcher tracks process identity and rolls back its recorded processes if startup fails. Stop checks PID, creation time and executable path, then stops that managed tree. It does not terminate unrelated processes simply because their name is ngrok or they own a particular port.
 
-If the public ngrok URL leaks while the tunnel is running, another party may be able to invoke those tools.
+Command jobs use Windows Job Objects for descendant tracking and termination when the server stops or crashes. This is lifecycle management, with no additional command, CPU, memory or directory policy. Programs delegated to a service or scheduler are outside that group. The server does not install a service, scheduled task, or other startup persistence.
 
-## Safer demo habits
+## Runtime data
 
-- Run it only while you are watching the machine.
-- Close sensitive apps first.
-- Use a temporary Windows user account if possible.
-- Keep the tunnel lifetime short.
-- Stop ngrok immediately after the demo.
-- Do not expose this on a work machine with private data.
-- Prefer OAuth or a secure tunnel for anything beyond a throwaway demo.
+The setup screen sends a supplied ngrok authtoken over a private stdin pipe to its configuration helper. The helper saves `.run/private/ngrok.yml` with inheritance disabled and access limited to the current user, Administrators and SYSTEM. Token values are not included in launcher arguments, settings JSON or setup transcripts. This local configuration takes precedence over the existing global ngrok config without replacing it. Runtime folders and common credential filenames are excluded from Git and release ZIPs.
 
-## Stop command
+`UploadFile` creates copies of selected files in `.run/uploads/`. Each download URL contains an unguessable ID and expires (24 hours by default); possession of that URL permits downloading the copy without an MCP session. Revocation blocks new downloads and removes the copy without changing its source. Expired copies are cleaned during subsequent publish operations. Already downloaded data cannot be recalled. Downloads force attachment disposition and disable caching and MIME sniffing.
+
+`.run/` contains instance state, logs, command scripts, command output, generated client configuration and verification reports. `.venv/` contains installed dependencies. Both are ignored by Git. Command output and script files can contain sensitive information and remain on disk until removed. ngrok is launched with traffic inspection disabled. Upstream anonymous telemetry is disabled by standard setup and startup.
+
+The preflight scan looks for common token patterns in tracked and untracked source files, excluding ignored runtime files. It reports filenames without printing matched values. This is a useful check, not a guarantee that source contains no secrets.
+
+## Stop or restrict exposure
 
 ```powershell
-.\scripts\stop-demo.ps1
+.\scripts\stop-demo.ps1 -Port 8010
 ```
 
-Or stop ngrok directly:
-
-```powershell
-Stop-Process -Name ngrok -Force
-```
-
-## Why no-auth is included anyway
-
-ChatGPT custom MCP app setup can be easiest to validate with "No Authentication". This repo documents that path honestly and makes the risk visible instead of hiding it.
+Use an elevated PowerShell to stop an elevated instance. For access only from this laptop, use stdio or `start-demo.ps1 -LocalOnly`. See the [README](../README.md) for both methods. No system UAC, antivirus or firewall protections are disabled by setup.
