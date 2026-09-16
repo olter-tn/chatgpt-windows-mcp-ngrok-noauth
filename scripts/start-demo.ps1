@@ -1,246 +1,156 @@
 param(
-    [int]$Port = 8002,
-    [string]$HostName = "127.0.0.1",
-    [string]$WindowsMcpPath = "",
-    [string]$NgrokPath = "",
-    [int]$ProxyPort = 0,
-    [double]$ScreenshotScale = 0.5,
+    [ValidateRange(1, 65534)][int]$Port = 8010,
+    [ValidateSet('127.0.0.1', 'localhost')][string]$HostName = '127.0.0.1',
+    [string]$WindowsMcpPath = '',
+    [string]$NgrokPath = '',
+    [ValidateRange(0, 65535)][int]$ProxyPort = 0,
+    [ValidateRange(0.1, 1.0)][double]$ScreenshotScale = 0.5,
     [switch]$NoAcceptProxy,
-    [switch]$SkipVerify
+    [switch]$SkipVerify,
+    [switch]$LocalOnly,
+    [switch]$RequireAdministrator
 )
-
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
-
-function Resolve-Executable {
-    param(
-        [string]$Name,
-        [string]$ExplicitPath
-    )
-
-    if ($ExplicitPath) {
-        $resolved = Resolve-Path -LiteralPath $ExplicitPath -ErrorAction Stop
-        return $resolved.Path
-    }
-
-    $cmd = Get-Command $Name -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($cmd) {
-        return $cmd.Source
-    }
-
-    return $null
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'common.ps1')
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$python = Get-RuntimePython $repoRoot
+$elevated = Test-Administrator
+if ($RequireAdministrator -and -not $elevated) {
+    throw 'Administrator access requested. Open PowerShell using Run as administrator and run this same command. Windows UAC approval is required.'
 }
-
-function Resolve-Ngrok {
-    if ($NgrokPath) {
-        return (Resolve-Path -LiteralPath $NgrokPath -ErrorAction Stop).Path
-    }
-
-    $fromPath = Resolve-Executable -Name "ngrok" -ExplicitPath ""
-    if ($fromPath) {
-        return $fromPath
-    }
-
-    $wingetRoot = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
-    if (Test-Path $wingetRoot) {
-        $candidate = Get-ChildItem $wingetRoot -Recurse -Filter ngrok.exe -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($candidate) {
-            return $candidate.FullName
+if ($ProxyPort -eq 0) { $ProxyPort = $Port + 1 }
+if (-not $NoAcceptProxy -and $ProxyPort -eq $Port) { throw 'Port and ProxyPort must be different.' }
+$instanceDir = Join-Path $repoRoot ".run\instances\$Port"
+New-Item -ItemType Directory -Force -Path $instanceDir | Out-Null
+$statePath = Join-Path $instanceDir 'state.json'
+$instanceLock = [IO.File]::Open((Join-Path $instanceDir 'instance.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+$state = $null
+$savedEnv = @{}
+try {
+    if (Test-Path -LiteralPath $statePath) {
+        $old = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+        foreach ($record in @($old.processes)) {
+            if (Test-ProcessIdentity $record) { throw "Instance $Port is running. Stop it using .\scripts\stop-demo.ps1 -Port $Port." }
         }
     }
-
-    throw "ngrok.exe was not found. Install ngrok and run: ngrok config add-authtoken YOUR_TOKEN"
-}
-
-function Wait-For-Port {
-    param(
-        [int]$WaitPort,
-        [int]$TimeoutSeconds = 30
-    )
-
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        $conn = Get-NetTCPConnection -LocalPort $WaitPort -ErrorAction SilentlyContinue |
-            Where-Object { $_.State -eq "Listen" } |
-            Select-Object -First 1
-        if ($conn) {
-            return $true
-        }
-        Start-Sleep -Milliseconds 500
+    Assert-PortAvailable $Port
+    if (-not $NoAcceptProxy) { Assert-PortAvailable $ProxyPort }
+    $ngrok = $null
+    if (-not $LocalOnly) {
+        $ngrok = Resolve-NgrokExecutable -RepoRoot $repoRoot -ExplicitPath $NgrokPath
+        Assert-PortAvailable 4040
+        $ngrokConfigArguments = @(Get-NgrokConfigArguments $repoRoot)
+        & $ngrok config check @ngrokConfigArguments 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'ngrok config check failed. Configure ngrok before starting, or use -LocalOnly.' }
     }
-    return $false
-}
-
-function Wait-For-NgrokTunnel {
-    param([int]$TimeoutSeconds = 30)
-
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        try {
-            $response = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 3
-            $tunnel = $response.tunnels | Where-Object { $_.proto -eq "https" } | Select-Object -First 1
-            if ($tunnel) {
-                return $tunnel.public_url
-            }
-        } catch {
+    $sourcePath = $null
+    if ($WindowsMcpPath) {
+        $checkout = (Resolve-Path -LiteralPath $WindowsMcpPath).Path
+        $sourcePath = Join-Path $checkout 'src'
+        if (-not (Test-Path -LiteralPath (Join-Path $sourcePath 'windows_mcp\__main__.py'))) {
+            throw "Windows-MCP source is missing in $checkout. Omit -WindowsMcpPath to use the locked package."
+        }
+    }
+    $environment = @{
+        WINDOWS_MCP_SCREENSHOT_SCALE = $ScreenshotScale.ToString([Globalization.CultureInfo]::InvariantCulture)
+        ANONYMIZED_TELEMETRY = 'false'
+        PYTHONIOENCODING = 'utf-8'
+        PYTHONUTF8 = '1'
+        WINDOWS_MCP_TOOLS = $null
+        WINDOWS_MCP_EXCLUDE_TOOLS = $null
+        WINDOWS_MCP_AUTH_KEY = $null
+        WINDOWS_MCP_IP_ALLOWLIST = $null
+        WINDOWS_MCP_CORS_ORIGINS = $null
+        WINDOWS_MCP_STATELESS_HTTP = $null
+        WINDOWS_MCP_INSTANCE_STATE = $statePath
+        PYTHONPATH = $sourcePath
+    }
+    foreach ($name in $environment.Keys) {
+        $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        [Environment]::SetEnvironmentVariable($name, $environment[$name], 'Process')
+    }
+    $configPath = Join-Path $instanceDir 'server.toml'
+    $config = "[server]`ntransport = `"streamable-http`"`nhost = `"$HostName`"`nport = $Port`n`n[tools]`nexclude = []`n"
+    [IO.File]::WriteAllText($configPath, $config, [Text.UTF8Encoding]::new($false))
+    $state = [ordered]@{
+        schema = 1; port = $Port; proxyPort = $(if ($NoAcceptProxy) { $null } else { $ProxyPort })
+        elevated = $elevated; status = 'starting'; url = $null
+        processes = [System.Collections.Generic.List[object]]::new()
+    }
+    Write-InstanceState $statePath $state
+    function Start-Component {
+        param([string]$Role, [string]$Executable, [string[]]$Arguments)
+        $nativeArgs = ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '
+        $process = Start-Process -FilePath $Executable -ArgumentList $nativeArgs -WorkingDirectory $repoRoot `
+            -RedirectStandardOutput (Join-Path $instanceDir "$Role.log") `
+            -RedirectStandardError (Join-Path $instanceDir "$Role.error.log") -WindowStyle Hidden -PassThru
+        $identity = Get-ProcessIdentity -ProcessId $process.Id -Role $Role
+        if ($identity) { $state.processes.Add($identity) }
+        Write-InstanceState $statePath $state
+        return $process
+    }
+    function Record-Listener {
+        param([int]$ListenerPid, [string]$Role)
+        if ($ListenerPid -notin @($state.processes | ForEach-Object pid)) {
+            $state.processes.Add((Get-ProcessIdentity -ProcessId $ListenerPid -Role $Role))
+            Write-InstanceState $statePath $state
+        }
+    }
+    $server = Start-Component 'server' $python @((Join-Path $PSScriptRoot 'full_server.py'), 'serve', '--config', $configPath, '--transport', 'streamable-http', '--host', $HostName, '--port', [string]$Port)
+    Record-Listener (Wait-ManagedPort $Port $server) 'server-listener'
+    $endpointPort = $Port
+    if (-not $NoAcceptProxy) {
+        $proxy = Start-Component 'proxy' $python @((Join-Path $PSScriptRoot 'mcp_accept_proxy.py'), '--listen-host', $HostName, '--listen-port', [string]$ProxyPort, '--target-host', $HostName, '--target-port', [string]$Port)
+        Record-Listener (Wait-ManagedPort $ProxyPort $proxy) 'proxy-listener'
+        $endpointPort = $ProxyPort
+    }
+    $state.url = "http://$HostName`:$endpointPort/mcp"
+    Write-InstanceState $statePath $state
+    $verifyArguments = @()
+    if ($RequireAdministrator) { $verifyArguments += '--require-admin' }
+    if (-not $SkipVerify) {
+        & $python (Join-Path $PSScriptRoot 'verify_mcp.py') $state.url @verifyArguments --report (Join-Path $instanceDir 'verification-local.json')
+        if ($LASTEXITCODE -ne 0) { throw 'Local MCP verification failed; see verification-local.json and component logs.' }
+    }
+    if ($ngrok) {
+        $upstream = "http://$HostName`:$endpointPort"
+        $tunnelProcess = Start-Component 'ngrok' $ngrok (@('http', $upstream, "--host-header=$HostName`:$endpointPort", '--log=stdout', '--inspect=false') + $ngrokConfigArguments)
+        Record-Listener (Wait-ManagedPort 4040 $tunnelProcess) 'ngrok-listener'
+        $deadline = [DateTime]::UtcNow.AddSeconds(45)
+        $publicUrl = $null
+        while ([DateTime]::UtcNow -lt $deadline) {
+            $tunnelProcess.Refresh()
+            if ($tunnelProcess.HasExited) { throw 'ngrok exited; see ngrok.error.log.' }
+            try {
+                $response = Invoke-RestMethod 'http://127.0.0.1:4040/api/tunnels' -TimeoutSec 3
+                $tunnel = $response.tunnels | Where-Object { $_.proto -eq 'https' -and $_.config.addr.TrimEnd('/') -eq $upstream } | Select-Object -First 1
+                if ($tunnel) { $publicUrl = $tunnel.public_url; break }
+            } catch { Write-Verbose $_ }
             Start-Sleep -Milliseconds 500
         }
+        if (-not $publicUrl) { throw 'No matching ngrok HTTPS tunnel appeared; check ngrok logs and authentication.' }
+        $state.url = "$publicUrl/mcp"
+        Write-InstanceState $statePath $state
+        if (-not $SkipVerify) {
+            & $python (Join-Path $PSScriptRoot 'verify_mcp.py') $state.url @verifyArguments --report (Join-Path $instanceDir 'verification-public.json')
+            if ($LASTEXITCODE -ne 0) { throw 'Public MCP verification failed.' }
+        }
     }
-    throw "ngrok did not expose a tunnel. Check .run\ngrok.error.log and your ngrok authtoken."
-}
-
-$repoRoot = Split-Path -Parent $PSScriptRoot
-$runDir = Join-Path $repoRoot ".run"
-New-Item -ItemType Directory -Force -Path $runDir | Out-Null
-
-if ($ProxyPort -eq 0) {
-    $ProxyPort = $Port + 1
-}
-
-$existing = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue |
-    Where-Object { $_.State -eq "Listen" } |
-    Select-Object -First 1
-if ($existing) {
-    throw "Port $Port is already in use by process $($existing.OwningProcess). Run .\scripts\stop-demo.ps1 or choose another port."
-}
-
-if (-not $NoAcceptProxy) {
-    $existingProxy = Get-NetTCPConnection -LocalPort $ProxyPort -ErrorAction SilentlyContinue |
-        Where-Object { $_.State -eq "Listen" } |
-        Select-Object -First 1
-    if ($existingProxy) {
-        throw "Proxy port $ProxyPort is already in use by process $($existingProxy.OwningProcess). Run .\scripts\stop-demo.ps1 or choose another proxy port."
+    $state.status = 'running'
+    Write-InstanceState $statePath $state
+    Write-Host "MCP URL: $($state.url)"
+    Write-Host "Administrator: $elevated | Authentication: None | Tools: full upstream set + laptop extensions"
+    Write-Host "State and logs: $instanceDir"
+    Write-Host "Stop: .\scripts\stop-demo.ps1 -Port $Port"
+} catch {
+    if ($null -ne $state) {
+        Stop-OwnedProcesses $state.processes
+        $state.status = 'failed'
+        Write-InstanceState $statePath $state
     }
-}
-
-$noAuthConfig = Join-Path $runDir "windows-mcp-no-auth.toml"
-@"
-[server]
-transport = "streamable-http"
-host = "$HostName"
-port = $Port
-"@ | Set-Content -LiteralPath $noAuthConfig -Encoding UTF8
-
-$env:WINDOWS_MCP_SCREENSHOT_SCALE = [string]$ScreenshotScale
-$env:ANONYMIZED_TELEMETRY = "false"
-Remove-Item Env:\WINDOWS_MCP_AUTH_KEY -ErrorAction SilentlyContinue
-
-if ($WindowsMcpPath) {
-    $resolvedWindowsMcpPath = (Resolve-Path -LiteralPath $WindowsMcpPath -ErrorAction Stop).Path
-    $uv = Resolve-Executable -Name "uv" -ExplicitPath ""
-    if (-not $uv) {
-        throw "uv was not found on PATH."
-    }
-    $serverExe = $uv
-    $serverArgs = @(
-        "--directory", $resolvedWindowsMcpPath,
-        "run", "--python", "3.13",
-        "windows-mcp", "serve",
-        "--config", $noAuthConfig,
-        "--transport", "streamable-http",
-        "--host", $HostName,
-        "--port", [string]$Port
-    )
-} else {
-    $uvx = Resolve-Executable -Name "uvx" -ExplicitPath ""
-    if (-not $uvx) {
-        throw "uvx was not found on PATH."
-    }
-    $serverExe = $uvx
-    $serverArgs = @(
-        "windows-mcp", "serve",
-        "--config", $noAuthConfig,
-        "--transport", "streamable-http",
-        "--host", $HostName,
-        "--port", [string]$Port
-    )
-}
-
-$serverOut = Join-Path $runDir "windows-mcp.log"
-$serverErr = Join-Path $runDir "windows-mcp.error.log"
-$serverProcess = Start-Process -FilePath $serverExe -ArgumentList $serverArgs `
-    -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr `
-    -WindowStyle Hidden -PassThru
-
-if (-not (Wait-For-Port -WaitPort $Port -TimeoutSeconds 45)) {
-    throw "Windows-MCP did not start on port $Port. Check $serverErr"
-}
-
-$proxyProcess = $null
-if (-not $NoAcceptProxy) {
-    $uvForProxy = Resolve-Executable -Name "uv" -ExplicitPath ""
-    if (-not $uvForProxy) {
-        throw "uv was not found on PATH."
-    }
-
-    $proxyScript = Join-Path $PSScriptRoot "mcp_accept_proxy.py"
-    $proxyOut = Join-Path $runDir "mcp-accept-proxy.log"
-    $proxyErr = Join-Path $runDir "mcp-accept-proxy.error.log"
-    $proxyArgs = @(
-        "run", "--python", "3.13",
-        "python", $proxyScript,
-        "--listen-host", $HostName,
-        "--listen-port", [string]$ProxyPort,
-        "--target-host", $HostName,
-        "--target-port", [string]$Port
-    )
-    $proxyProcess = Start-Process -FilePath $uvForProxy -ArgumentList $proxyArgs `
-        -RedirectStandardOutput $proxyOut -RedirectStandardError $proxyErr `
-        -WindowStyle Hidden -PassThru
-
-    if (-not (Wait-For-Port -WaitPort $ProxyPort -TimeoutSeconds 30)) {
-        throw "MCP accept proxy did not start on port $ProxyPort. Check $proxyErr"
-    }
-}
-
-$ngrokExe = Resolve-Ngrok
-$ngrokOut = Join-Path $runDir "ngrok.log"
-$ngrokErr = Join-Path $runDir "ngrok.error.log"
-
-Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Seconds 1
-
-$ngrokPort = if ($NoAcceptProxy) { $Port } else { $ProxyPort }
-$upstream = "http://$HostName`:$ngrokPort"
-$ngrokArgs = @(
-    "http", $upstream,
-    "--host-header=$HostName`:$ngrokPort",
-    "--log=stdout"
-)
-$ngrokProcess = Start-Process -FilePath $ngrokExe -ArgumentList $ngrokArgs `
-    -RedirectStandardOutput $ngrokOut -RedirectStandardError $ngrokErr `
-    -WindowStyle Hidden -PassThru
-
-$publicUrl = Wait-For-NgrokTunnel -TimeoutSeconds 45
-$mcpUrl = "$publicUrl/mcp"
-
-Write-Host ""
-Write-Host "Windows-MCP process: $($serverProcess.Id)"
-if ($proxyProcess) {
-    Write-Host "Accept proxy process: $($proxyProcess.Id)"
-}
-Write-Host "ngrok process:       $($ngrokProcess.Id)"
-Write-Host ""
-Write-Host "ChatGPT MCP URL:"
-Write-Host $mcpUrl
-Write-Host ""
-Write-Host "ChatGPT settings:"
-Write-Host "Protocol: Streamable HTTP"
-Write-Host "Authentication: No Authentication"
-if ($proxyProcess) {
-    Write-Host "Compatibility: Missing Accept headers are normalized before Windows-MCP"
-}
-Write-Host ""
-Write-Host "Stop with:"
-Write-Host ".\scripts\stop-demo.ps1 -Port $Port"
-Write-Host ""
-
-if (-not $SkipVerify) {
-    try {
-        $verifyScript = Join-Path $PSScriptRoot "verify_mcp.py"
-        & uv run --with fastmcp python $verifyScript $mcpUrl
-    } catch {
-        Write-Warning "Verification failed. Try manually: uv run --with fastmcp python .\scripts\verify_mcp.py $mcpUrl"
-    }
+    throw
+} finally {
+    foreach ($name in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], 'Process') }
+    $instanceLock.Dispose()
 }
